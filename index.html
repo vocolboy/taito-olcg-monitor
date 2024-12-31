@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <title>Modern WebSocket + Fetch Interface (Reverse Order)</title>
+    <style>
+        /* 容器：排列所有卡片（倒序時，最新卡片會出現在最上方） */
+        #stationContainer {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            justify-content: center;
+            margin: 20px auto;
+            max-width: 1280px;
+        }
+
+        /* 每張卡片的外觀 */
+        .station-card {
+            flex: 1 1 calc(30% - 20px); /* 大約三張卡片一排 */
+            background: #fff;
+            border: 1px solid #eee;
+            border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+            padding: 15px;
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        /* 影像區：包含 front 與 side 圖 */
+        .station-images {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            width: 100%;
+            margin-bottom: 10px;
+        }
+
+        /* 影像本身 */
+        .station-images img {
+            width: 100%;
+            max-width: 120px; /* 控制每張圖的寬度 */
+            border-radius: 4px;
+            border: 1px solid #ddd;
+            object-fit: cover;
+        }
+
+        /* station_id 的標籤 */
+        .station-id {
+            margin-top: 5px;
+            color: #333;
+            font-weight: 600;
+            text-align: center;
+        }
+
+        /* 媒體查詢：窄螢幕時卡片寬度調整 */
+        @media (max-width: 768px) {
+            .station-card {
+                flex: 1 1 calc(45% - 20px);
+            }
+        }
+        @media (max-width: 480px) {
+            .station-card {
+                flex: 1 1 100%;
+            }
+            .station-images img {
+                max-width: 100px;
+            }
+        }
+    </style>
+</head>
+<body>
+<h1 style="text-align: center;">WebSocket 訂閱示範 (最新更新優先顯示)</h1>
+<p style="text-align: center;">
+    1. 先透過 <code>v2/contents/prize</code> API 取得 station 清單。<br>
+    2. 以 WebSocket 監聽事件，偵測到 <code>playing = 1</code> 後呼叫 API，顯示前/側視角影像。<br>
+    3. 每次更新時，卡片會被移除並重新插入到最上面，以達到「最新更新優先」。
+</p>
+
+<!-- 卡片容器 -->
+<div id="stationContainer"></div>
+
+<script>
+    // -----------------------------------------
+    // 步驟 1: 先取得所有 station_id, station_admin_id 清單
+    // -----------------------------------------
+    const stationMap = {}; // stationMap[station_admin_id] = station_id
+
+    fetch('https://api.taito-olcg.com/v2/contents/prize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            prize: { is_all: "1" },
+            shop_id: "4"
+        })
+    })
+        .then(resp => resp.json())
+        .then(data => {
+            // 解析回傳 JSON，存進 stationMap
+            const list = data?.prize?.list;
+            if (Array.isArray(list)) {
+                list.forEach(item => {
+                    const stationId = item.station_id;
+                    const stationAdminId = item.station_admin_id;
+                    if (stationId && stationAdminId) {
+                        stationMap[stationAdminId] = stationId;
+                    }
+                });
+            }
+            console.log("stationMap: ", stationMap);
+
+            // 取得清單後，再進行 WebSocket 連線
+            setupWebSocket();
+        })
+        .catch(err => {
+            console.error("取得 station 清單失敗：", err);
+        });
+
+    // -----------------------------------------
+    // 步驟 2: 建立 WebSocket 監聽，收到 playing=1 時呼叫 API 取影像
+    // -----------------------------------------
+    function setupWebSocket() {
+        const socket = new WebSocket("wss://websocket001.taito-olcg.com/socket.io/?EIO=3&transport=websocket");
+
+        // 連線成功後，依序訂閱
+        socket.addEventListener("open", () => {
+            console.log("WebSocket 已連線");
+            socket.send('42["subscribe",{"channel":"top","auth":{"headers":{}}}]');
+            socket.send('42["subscribe",{"channel":"top-Web","auth":{"headers":{}}}]');
+            socket.send('42["subscribe",{"channel":"push","auth":{"headers":{}}}]');
+            socket.send('42["subscribe",{"channel":"EhRxHQ7LqlVDxKEpYBP8dcQDWHz2","auth":{"headers":{}}}]');
+
+            setInterval(()=>{
+                socket.send('2');
+            },5000)
+        });
+
+        // 當接收到伺服器訊息時
+        socket.addEventListener("message", (event) => {
+            const rawData = event.data;
+
+            // Socket.IO 標準訊息通常以 "42[" 開頭，先判斷是否符合
+            if (rawData.startsWith("42[")) {
+                // 去除前兩碼 ("42")
+                const jsonStr = rawData.slice(2);
+                try {
+                    const parsed = JSON.parse(jsonStr);
+                    // 範例結構: ["App\\Events\\Updates","top",{ "list": [...] }]
+                    if (Array.isArray(parsed) && parsed.length >= 3) {
+                        const [, , payload] = parsed;
+                        if (payload && payload.list && Array.isArray(payload.list)) {
+                            payload.list.forEach(item => {
+                                // 當偵測到 playing = 1
+                                if (item.playing === 1 && item.station_admin_id) {
+                                    // 從 stationMap 取得對應的 station_id
+                                    const stationId = stationMap[item.station_admin_id];
+                                    if (stationId) {
+                                        console.log("偵測到 playing = 1，station_id:", stationId);
+                                        // 呼叫後端 API 取資料 (motion_jpeg)
+                                        fetchPrizeInfo(stationId);
+                                    }
+                                }
+                            });
+                        }
+                    }
+                } catch (error) {
+                    console.error("JSON 解析失敗：", error);
+                }
+            }
+        });
+
+        socket.addEventListener("close", () => {
+            console.log("WebSocket 已關閉");
+        });
+
+        socket.addEventListener("error", (err) => {
+            console.error("WebSocket 發生錯誤：", err);
+        });
+    }
+
+    // -----------------------------------------
+    // 呼叫內容 API，取得前後視角影像
+    // -----------------------------------------
+    function fetchPrizeInfo(stationId) {
+        fetch('https://api.taito-olcg.com/contents/prize', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                user_id: "ae66ae3e-d304-420f-b64c-76f057ab74da_guest",
+                prize: { station_id: stationId },
+                shop_id: "4"
+            })
+        })
+            .then(response => response.json())
+            .then(data => {
+                // 從回傳中解析出 motion_jpeg_front, motion_jpeg_side
+                const info = data?.prize?.list?.[0]?.watch_info;
+                const motionFront = info?.motion_jpeg_front || "";
+                const motionSide  = info?.motion_jpeg_side  || "";
+
+                // 更新介面
+                renderStationCard(stationId, motionFront, motionSide);
+            })
+            .catch(err => {
+                console.error("呼叫後端 API 錯誤：", err);
+            });
+    }
+
+    // -----------------------------------------
+    // 新增/更新卡片 UI，並將「最新更新」的卡片放在最上方
+    // -----------------------------------------
+    function renderStationCard(stationId, front, side) {
+        const container = document.getElementById("stationContainer");
+
+        // 先檢查是否已有此 stationId 的卡片
+        let cardEl = document.getElementById("card-" + stationId);
+
+        // 如果卡片已存在，先從容器移除
+        if (cardEl) {
+            container.removeChild(cardEl);
+        } else {
+            // 沒有就新建一張卡片
+            cardEl = document.createElement("div");
+            cardEl.className = "station-card";
+            cardEl.id = "card-" + stationId;
+
+            // 建立 1) 影像容器 & 2) stationId 標籤
+            const imagesDiv = document.createElement("div");
+            imagesDiv.className = "station-images";
+            imagesDiv.id = "img-" + stationId;
+
+            const stationDiv = document.createElement("div");
+            stationDiv.className = "station-id";
+            stationDiv.id = "label-" + stationId;
+            stationDiv.textContent = stationId; // 預設顯示
+
+            // 組裝整張卡片
+            cardEl.appendChild(imagesDiv);
+            cardEl.appendChild(stationDiv);
+        }
+
+        // 更新卡片裡的影像
+        const imagesDiv = cardEl.querySelector("#img-" + stationId);
+        imagesDiv.innerHTML = "";
+
+        // front
+        if (front) {
+            const frontImg = document.createElement("img");
+            frontImg.src = front;
+            frontImg.alt = stationId + " front";
+            imagesDiv.appendChild(frontImg);
+        }
+        // side
+        if (side) {
+            const sideImg = document.createElement("img");
+            sideImg.src = side;
+            sideImg.alt = stationId + " side";
+            imagesDiv.appendChild(sideImg);
+        }
+
+        // 將卡片插到容器最前面 (最新更新顯示於上方)
+        // 方式一：insertBefore
+        // if (container.firstChild) {
+        //   container.insertBefore(cardEl, container.firstChild);
+        // } else {
+        //   container.appendChild(cardEl);
+        // }
+
+        // 方式二：使用 prepend (較簡潔)
+        container.prepend(cardEl);
+    }
+</script>
+</body>
+</html>
