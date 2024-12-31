@@ -2,7 +2,7 @@
 <html lang="zh-Hant">
 <head>
     <meta charset="UTF-8">
-    <title>Modern WebSocket + Fetch Interface (Reverse Order)</title>
+    <title>Taito monitor</title>
     <style>
         /* 容器：排列所有卡片（倒序時，最新卡片會出現在最上方） */
         #stationContainer {
@@ -46,12 +46,31 @@
             object-fit: cover;
         }
 
-        /* station_id 的標籤 */
+        /* station_id 的標籤（可點擊連結） */
         .station-id {
             margin-top: 5px;
             color: #333;
             font-weight: 600;
             text-align: center;
+        }
+        .station-id a {
+            text-decoration: none;
+            color: #333;
+        }
+        .station-id a:hover {
+            color: #007bff;
+        }
+
+        /* 額外顯示的資訊 (標題與所需點數) */
+        .station-info {
+            margin-top: 5px;
+            text-align: center;
+            font-size: 14px;
+            color: #555;
+        }
+        .station-info .title {
+            font-weight: 600;
+            margin-bottom: 4px;
         }
 
         /* 媒體查詢：窄螢幕時卡片寬度調整 */
@@ -69,15 +88,10 @@
             }
         }
     </style>
+
 </head>
 <body>
-<h1 style="text-align: center;">WebSocket 訂閱示範 (最新更新優先顯示)</h1>
-<p style="text-align: center;">
-    1. 先透過 <code>v2/contents/prize</code> API 取得 station 清單。<br>
-    2. 以 WebSocket 監聽事件，偵測到 <code>playing = 1</code> 後呼叫 API，顯示前/側視角影像。<br>
-    3. 每次更新時，卡片會被移除並重新插入到最上面，以達到「最新更新優先」。
-</p>
-
+<h1 style="text-align: center;">Taito monitor<br> (タイトーのオンラインクレーンゲーム)</h1>
 <!-- 卡片容器 -->
 <div id="stationContainer"></div>
 
@@ -131,18 +145,18 @@
             socket.send('42["subscribe",{"channel":"push","auth":{"headers":{}}}]');
             socket.send('42["subscribe",{"channel":"EhRxHQ7LqlVDxKEpYBP8dcQDWHz2","auth":{"headers":{}}}]');
 
-            setInterval(()=>{
+            // 由於部分 Socket.IO 伺服器在閒置時可能會斷線
+            // 這裡示範每隔 5 秒送一次 '2' 心跳，保持連線
+            setInterval(() => {
                 socket.send('2');
-            },5000)
+            }, 5000);
         });
 
         // 當接收到伺服器訊息時
         socket.addEventListener("message", (event) => {
             const rawData = event.data;
-
-            // Socket.IO 標準訊息通常以 "42[" 開頭，先判斷是否符合
+            // Socket.IO 標準訊息通常以 "42[" 開頭
             if (rawData.startsWith("42[")) {
-                // 去除前兩碼 ("42")
                 const jsonStr = rawData.slice(2);
                 try {
                     const parsed = JSON.parse(jsonStr);
@@ -157,7 +171,7 @@
                                     const stationId = stationMap[item.station_admin_id];
                                     if (stationId) {
                                         console.log("偵測到 playing = 1，station_id:", stationId);
-                                        // 呼叫後端 API 取資料 (motion_jpeg)
+                                        // 呼叫後端 API 取資料 (motion_jpeg 等)
                                         fetchPrizeInfo(stationId);
                                     }
                                 }
@@ -180,7 +194,7 @@
     }
 
     // -----------------------------------------
-    // 呼叫內容 API，取得前後視角影像
+    // 呼叫內容 API，取得前後視角影像 + (title_all, need_tc)
     // -----------------------------------------
     function fetchPrizeInfo(stationId) {
         fetch('https://api.taito-olcg.com/contents/prize', {
@@ -194,13 +208,19 @@
         })
             .then(response => response.json())
             .then(data => {
-                // 從回傳中解析出 motion_jpeg_front, motion_jpeg_side
-                const info = data?.prize?.list?.[0]?.watch_info;
-                const motionFront = info?.motion_jpeg_front || "";
-                const motionSide  = info?.motion_jpeg_side  || "";
+                const prizeItem = data?.prize?.list?.[0];
+                if (prizeItem) {
+                    const info = prizeItem?.watch_info;
+                    const motionFront = info?.motion_jpeg_front || "";
+                    const motionSide  = info?.motion_jpeg_side  || "";
 
-                // 更新介面
-                renderStationCard(stationId, motionFront, motionSide);
+                    // 新增: 取出 title_all 與 need_tc
+                    const titleAll = prizeItem.title_all || "No Title";
+                    const needTc   = prizeItem.need_tc   || 0;
+
+                    // 更新介面
+                    renderStationCard(stationId, motionFront, motionSide, titleAll, needTc);
+                }
             })
             .catch(err => {
                 console.error("呼叫後端 API 錯誤：", err);
@@ -210,7 +230,7 @@
     // -----------------------------------------
     // 新增/更新卡片 UI，並將「最新更新」的卡片放在最上方
     // -----------------------------------------
-    function renderStationCard(stationId, front, side) {
+    function renderStationCard(stationId, front, side, titleAll, needTc) {
         const container = document.getElementById("stationContainer");
 
         // 先檢查是否已有此 stationId 的卡片
@@ -225,7 +245,7 @@
             cardEl.className = "station-card";
             cardEl.id = "card-" + stationId;
 
-            // 建立 1) 影像容器 & 2) stationId 標籤
+            // 建立 1) 影像容器 & 2) stationId (超連結)
             const imagesDiv = document.createElement("div");
             imagesDiv.className = "station-images";
             imagesDiv.id = "img-" + stationId;
@@ -233,25 +253,30 @@
             const stationDiv = document.createElement("div");
             stationDiv.className = "station-id";
             stationDiv.id = "label-" + stationId;
-            stationDiv.textContent = stationId; // 預設顯示
+
+            // 建立 <a> 超連結，連到指定網址
+            const stationLink = document.createElement("a");
+            stationLink.target = '_blank';
+            stationLink.href = "https://www.taito-olcg.com/pc/play/%E3%83%88%E3%83%A0%E3%81%A8%E3%82%B8%E3%82%A7%E3%83%AA%E3%83%BC/%E6%A9%8B%E3%82%8F%E3%81%9F%E3%81%97/" + stationId + "/";
+            stationLink.textContent = stationId;
+
+            stationDiv.appendChild(stationLink);
 
             // 組裝整張卡片
             cardEl.appendChild(imagesDiv);
             cardEl.appendChild(stationDiv);
         }
 
-        // 更新卡片裡的影像
+        // 更新卡片裡的影像區
         const imagesDiv = cardEl.querySelector("#img-" + stationId);
         imagesDiv.innerHTML = "";
 
-        // front
         if (front) {
             const frontImg = document.createElement("img");
             frontImg.src = front;
             frontImg.alt = stationId + " front";
             imagesDiv.appendChild(frontImg);
         }
-        // side
         if (side) {
             const sideImg = document.createElement("img");
             sideImg.src = side;
@@ -259,15 +284,22 @@
             imagesDiv.appendChild(sideImg);
         }
 
-        // 將卡片插到容器最前面 (最新更新顯示於上方)
-        // 方式一：insertBefore
-        // if (container.firstChild) {
-        //   container.insertBefore(cardEl, container.firstChild);
-        // } else {
-        //   container.appendChild(cardEl);
-        // }
+        // 新增：顯示 title_all 與 need_tc
+        // 若卡片上已經有這兩個欄位，可以先找再更新；若無，則新建
+        let infoDiv = cardEl.querySelector(".station-info");
+        if (!infoDiv) {
+            infoDiv = document.createElement("div");
+            infoDiv.className = "station-info";
+            cardEl.appendChild(infoDiv);
+        }
 
-        // 方式二：使用 prepend (較簡潔)
+        // 清空並插入新的資訊
+        infoDiv.innerHTML = `
+            <div class="title">${titleAll}</div>
+            <div class="need-tc">需要點數 (TC): ${needTc}</div>
+        `;
+
+        // 將卡片插到容器最前面 (最新更新顯示於上方)
         container.prepend(cardEl);
     }
 </script>
